@@ -1,7 +1,9 @@
 import asyncio
 import logging
 import os
-from aiohttp import web
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from bot import SmartAIO, dp, SmartPyro, SmartUserBot
 from bot.core.database import SmartReboot
 from bot.helpers.logger import LOGGER
@@ -9,25 +11,39 @@ from bot.misc.callback import handle_callback_query
 from importlib import import_module
 
 # Health check server for Render
-async def health_check(request):
-    return web.Response(text="Bot is running")
+PORT = int(os.environ.get('PORT', 10000))
 
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get('/', health_check)
-    app.router.add_get('/health', health_check)
-    
-    port = int(os.environ.get("PORT", 8080))
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    LOGGER.info(f"Health check server started on port {port}")
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/ping' or self.path == '/health':
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"OK")
+        elif self.path == '/':
+            self.send_response(200)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+            html = "<h1>XPTOOLS Bot</h1><p>Bot is running</p>"
+            self.wfile.write(html.encode('utf-8'))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+def run_health_server():
+    """Run HTTP server for Render health checks."""
+    try:
+        server = HTTPServer(('0.0.0.0', PORT), HealthHandler)
+        LOGGER.info(f"🌐 Health server started on 0.0.0.0:{PORT}")
+        server.serve_forever()
+    except Exception as e:
+        LOGGER.error(f"Failed to start health server: {e}")
 
 async def main():
     try:
-        # Start health check server for Render
-        await start_web_server()
+        # Start health check server in a separate thread
+        health_thread = threading.Thread(target=run_health_server, daemon=True)
+        health_thread.start()
         
         modules_path = "bot.modules"
         modules_dir = os.path.join(os.path.dirname(__file__), "bot", "modules")
@@ -36,13 +52,17 @@ async def main():
                 module_name = filename[:-3]
                 try:
                     import_module(f"{modules_path}.{module_name}")
+                    LOGGER.info(f"Loaded module: {module_name}")
                 except Exception as e:
                     LOGGER.error(f"Failed to load module {module_name}: {e}")
         
         dp.callback_query.register(handle_callback_query)
         
         await SmartPyro.start()
+        LOGGER.info("SmartPyro started successfully")
+        
         await SmartUserBot.start()
+        LOGGER.info("SmartUserBot started successfully")
         
         LOGGER.info("Bot Successfully Started 💥")
         
@@ -62,7 +82,7 @@ async def main():
         
         try:
             await SmartAIO.delete_webhook(drop_pending_updates=True)
-            
+            LOGGER.info("Webhook cleared")
         except Exception as e:
             LOGGER.warning(f"Could not clear webhook: {e}")
         
