@@ -3,6 +3,14 @@
 #  Copyright (C) 2024-present 𝗫𝗣 𝗧𝗢𝗢𝗟𝗦™ <https://github.com/XPTOOLS> 
 import asyncio
 import logging
+
+# Fix for Python 3.14 asyncio issue
+try:
+    loop = asyncio.get_event_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
 from config import BOT_TOKEN, API_ID, API_HASH, SESSION_STRING
 from bot.helpers.logger import LOGGER
 from aiogram import Bot, Dispatcher
