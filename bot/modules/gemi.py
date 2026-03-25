@@ -1,0 +1,314 @@
+import asyncio
+import os
+from aiogram import Bot
+from aiogram.filters import Command
+from aiogram.types import Message
+from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
+from bot import dp
+from bot.helpers.botutils import send_message, delete_messages
+from bot.helpers.commands import BotCommands
+from bot.helpers.logger import LOGGER
+from bot.helpers.utils import new_task
+from bot.helpers.notify import Smart_Notify
+from bot.helpers.defend import SmartDefender
+from config import GOOGLE_API_KEY, MODEL_NAME, IMGAI_SIZE_LIMIT
+from google import genai
+from google.genai import types
+from PIL import Image
+import re
+
+client = genai.Client(api_key=GOOGLE_API_KEY)
+
+
+def escape_html(text):
+    html_escape_table = {
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "`": "&#96;",
+        "\"": "&quot;",
+        "'": "&apos;"
+    }
+    return "".join(html_escape_table.get(c, c) for c in text)
+
+
+def format_code_response(text):
+    replacements = [
+        (r"^> (.*)", r"<blockquote>\1</blockquote>"),
+        (r"```(?:\w*)\n([\s\S]*?)\n```", r"<pre>\1</pre>"),
+        (r"`(.*?)`", r"<code>\1</code>"),
+        (r"\*\*(.*?)\*\*", r"<b>\1</b>"),
+        (r"\*(.*?)\*", r"<i>\1</i>"),
+        (r"__(.*?)__", r"<i>\1</i>"),
+        (r"_(.*?)_", r"<i>\1</i>"),
+        (r"~~(.*?)~~", r"<s>\1</s>"),
+        (r"\[(.*?)\]\((.*?)\)", r'<a href="\2">\1</a>')
+    ]
+    parts = []
+    last_pos = 0
+    code_block_pattern = re.compile(r"```(?:\w*)\n([\s\S]*?)\n```", re.MULTILINE | re.DOTALL)
+    for match in code_block_pattern.finditer(text):
+        start, end = match.span()
+        parts.append(escape_html(text[last_pos:start]))
+        parts.append(f"<pre>{escape_html(match.group(1))}</pre>")
+        last_pos = end
+    parts.append(escape_html(text[last_pos:]))
+    text = "".join(parts)
+    for pattern, replacement in replacements[2:]:
+        text = re.sub(pattern, replacement, text, flags=re.MULTILINE | re.DOTALL)
+    text = re.sub(r'<!DOCTYPE[^>]*>|<!doctype[^>]*>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'<\?[\s\S]*?\?>', '', text)
+    return text
+
+
+@dp.message(Command(commands=["gem", "gemi", "gemini"], prefix=BotCommands))
+@new_task
+@SmartDefender
+async def gemi_handler(message: Message, bot: Bot):
+    LOGGER.info(f"Received command: '{message.text}' from user {message.from_user.id if message.from_user else 'Unknown'} in chat {message.chat.id}")
+    progress_message = None
+    try:
+        progress_message = await send_message(
+            chat_id=message.chat.id,
+            text="<b>🔍 GeminiAI is thinking, Please Wait ✨</b>",
+            parse_mode=ParseMode.HTML
+        )
+        prompt = None
+        command_text = message.text.split(maxsplit=1)
+        if message.reply_to_message and message.reply_to_message.text:
+            prompt = message.reply_to_message.text
+        elif len(command_text) > 1:
+            prompt = command_text[1]
+        if not prompt:
+            await progress_message.edit_text(
+                text="<b>Please Provide A Prompt For GeminiAI ✨ Response</b>",
+                parse_mode=ParseMode.HTML
+            )
+            LOGGER.info(f"Prompt missing for Gemini command in chat {message.chat.id}")
+            return
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=prompt
+        )
+        response_text = response.text
+        formatted_text = format_code_response(response_text)
+        if len(formatted_text) > 4096:
+            await delete_messages(message.chat.id, progress_message.message_id)
+            parts = []
+            current_part = ""
+            for line in formatted_text.splitlines(True):
+                if len(current_part) + len(line) <= 4096:
+                    current_part += line
+                else:
+                    if current_part:
+                        parts.append(current_part)
+                    current_part = line
+            if current_part:
+                parts.append(current_part)
+            for part in parts:
+                try:
+                    await send_message(
+                        chat_id=message.chat.id,
+                        text=part,
+                        parse_mode=ParseMode.HTML
+                    )
+                    await asyncio.sleep(0.5)
+                except TelegramBadRequest as send_e:
+                    LOGGER.error(f"Failed to send message part to chat {message.chat.id}: {str(send_e)}")
+                    await Smart_Notify(bot, "gemini", send_e, message)
+            LOGGER.info(f"Successfully sent Gemini response (split) to chat {message.chat.id}")
+        else:
+            try:
+                await progress_message.edit_text(
+                    text=formatted_text,
+                    parse_mode=ParseMode.HTML
+                )
+                LOGGER.info(f"Successfully sent Gemini response to chat {message.chat.id}")
+            except TelegramBadRequest as edit_e:
+                LOGGER.error(f"Failed to edit progress message in chat {message.chat.id}: {str(edit_e)}")
+                await Smart_Notify(bot, "gemini", edit_e, message)
+                await delete_messages(message.chat.id, progress_message.message_id)
+                await send_message(
+                    chat_id=message.chat.id,
+                    text=formatted_text,
+                    parse_mode=ParseMode.HTML
+                )
+                LOGGER.info(f"Successfully sent Gemini response to chat {message.chat.id}")
+    except Exception as e:
+        LOGGER.error(f"Gemini error in chat {message.chat.id}: {str(e)}")
+        await Smart_Notify(bot, "gemini", e, message)
+        if progress_message:
+            try:
+                await progress_message.edit_text(
+                    text="<b>❌ Sorry Bro Gemini API Error</b>",
+                    parse_mode=ParseMode.HTML
+                )
+                LOGGER.info(f"Edited progress message with Gemini error in chat {message.chat.id}")
+            except TelegramBadRequest as edit_e:
+                LOGGER.error(f"Failed to edit progress message in chat {message.chat.id}: {str(edit_e)}")
+                await Smart_Notify(bot, "gemini", edit_e, message)
+                await send_message(
+                    chat_id=message.chat.id,
+                    text="<b>❌ Sorry Bro Gemini API Error</b>",
+                    parse_mode=ParseMode.HTML
+                )
+                LOGGER.info(f"Sent Gemini error message to chat {message.chat.id}")
+        else:
+            await send_message(
+                chat_id=message.chat.id,
+                text="<b>❌ Sorry Bro Gemini API Error</b>",
+                parse_mode=ParseMode.HTML
+            )
+            LOGGER.info(f"Sent Gemini error message to chat {message.chat.id}")
+
+
+@dp.message(Command(commands=["imgai"], prefix=BotCommands))
+@new_task
+@SmartDefender
+async def imgai_handler(message: Message, bot: Bot):
+    LOGGER.info(f"Received command: '{message.text}' from user {message.from_user.id if message.from_user else 'Unknown'} in chat {message.chat.id}")
+    progress_message = None
+    try:
+        if not message.reply_to_message or not message.reply_to_message.photo:
+            await send_message(
+                chat_id=message.chat.id,
+                text="<b>❌ Please Reply To An Image For Analysis</b>",
+                parse_mode=ParseMode.HTML
+            )
+            LOGGER.info(f"No image replied for imgai command in chat {message.chat.id}")
+            return
+        progress_message = await send_message(
+            chat_id=message.chat.id,
+            text="<b>🔍 Gemini Is Analyzing The Image Please Wait ✨</b>",
+            parse_mode=ParseMode.HTML
+        )
+        photo = message.reply_to_message.photo[-1]
+        photo_path = f"temp_{message.chat.id}_{photo.file_id}.jpg"
+        try:
+            await bot.download(file=photo, destination=photo_path)
+            if os.path.getsize(photo_path) > IMGAI_SIZE_LIMIT:
+                await progress_message.edit_text(
+                    text="<b>❌ Sorry Bro Image Too Large</b>",
+                    parse_mode=ParseMode.HTML
+                )
+                LOGGER.info(f"Image too large for imgai in chat {message.chat.id}")
+                return
+            with Image.open(photo_path) as img:
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                command_text = message.text.split(maxsplit=1)
+                user_prompt = command_text[1] if len(command_text) > 1 else "Describe this image in detail"
+                
+                with open(photo_path, 'rb') as image_file:
+                    image_data = image_file.read()
+                
+                response = client.models.generate_content(
+                    model=MODEL_NAME,
+                    contents=[
+                        types.Part.from_text(user_prompt),
+                        types.Part.from_bytes(
+                            data=image_data,
+                            mime_type="image/jpeg"
+                        )
+                    ]
+                )
+                analysis = response.text
+                formatted_text = format_code_response(analysis)
+                if len(formatted_text) > 4096:
+                    await delete_messages(message.chat.id, progress_message.message_id)
+                    parts = []
+                    current_part = ""
+                    for line in formatted_text.splitlines(True):
+                        if len(current_part) + len(line) <= 4096:
+                            current_part += line
+                        else:
+                            if current_part:
+                                parts.append(current_part)
+                            current_part = line
+                    if current_part:
+                        parts.append(current_part)
+                    for part in parts:
+                        try:
+                            await send_message(
+                                chat_id=message.chat.id,
+                                text=part,
+                                parse_mode=ParseMode.HTML
+                            )
+                            await asyncio.sleep(0.5)
+                        except TelegramBadRequest as send_e:
+                            LOGGER.error(f"Failed to send message part to chat {message.chat.id}: {str(send_e)}")
+                            await Smart_Notify(bot, "imgai", send_e, message)
+                    LOGGER.info(f"Successfully sent imgai response (split) to chat {message.chat.id}")
+                else:
+                    try:
+                        await progress_message.edit_text(
+                            text=formatted_text,
+                            parse_mode=ParseMode.HTML
+                        )
+                        LOGGER.info(f"Successfully sent imgai response to chat {message.chat.id}")
+                    except TelegramBadRequest as edit_e:
+                        LOGGER.error(f"Failed to edit progress message in chat {message.chat.id}: {str(edit_e)}")
+                        await Smart_Notify(bot, "imgai", edit_e, message)
+                        await delete_messages(message.chat.id, progress_message.message_id)
+                        await send_message(
+                            chat_id=message.chat.id,
+                            text=formatted_text,
+                            parse_mode=ParseMode.HTML
+                        )
+                        LOGGER.info(f"Successfully sent imgai response to chat {message.chat.id}")
+        except Exception as e:
+            LOGGER.error(f"Image analysis error in chat {message.chat.id}: {str(e)}")
+            await Smart_Notify(bot, "imgai", e, message)
+            if progress_message:
+                try:
+                    await progress_message.edit_text(
+                        text="<b>❌ Sorry Bro ImageAI Error</b>",
+                        parse_mode=ParseMode.HTML
+                    )
+                    LOGGER.info(f"Edited progress message with imgai error in chat {message.chat.id}")
+                except TelegramBadRequest as edit_e:
+                    LOGGER.error(f"Failed to edit progress message in chat {message.chat.id}: {str(edit_e)}")
+                    await Smart_Notify(bot, "imgai", edit_e, message)
+                    await send_message(
+                        chat_id=message.chat.id,
+                        text="<b>❌ Sorry Bro ImageAI Error</b>",
+                        parse_mode=ParseMode.HTML
+                    )
+                    LOGGER.info(f"Sent imgai error message to chat {message.chat.id}")
+            else:
+                await send_message(
+                    chat_id=message.chat.id,
+                    text="<b>❌ Sorry Bro ImageAI Error</b>",
+                    parse_mode=ParseMode.HTML
+                )
+                LOGGER.info(f"Sent imgai error message to chat {message.chat.id}")
+        finally:
+            if os.path.exists(photo_path):
+                os.remove(photo_path)
+    except Exception as e:
+        LOGGER.error(f"Image analysis error in chat {message.chat.id}: {str(e)}")
+        await Smart_Notify(bot, "imgai", e, message)
+        if progress_message:
+            try:
+                await progress_message.edit_text(
+                    text="<b>❌ Sorry Bro ImageAI Error</b>",
+                    parse_mode=ParseMode.HTML
+                )
+                LOGGER.info(f"Edited progress message with imgai error in chat {message.chat.id}")
+            except TelegramBadRequest as edit_e:
+                LOGGER.error(f"Failed to edit progress message in chat {message.chat.id}: {str(edit_e)}")
+                await Smart_Notify(bot, "imgai", edit_e, message)
+                await send_message(
+                    chat_id=message.chat.id,
+                    text="<b>❌ Sorry Bro ImageAI Error</b>",
+                    parse_mode=ParseMode.HTML
+                )
+                LOGGER.info(f"Sent imgai error message to chat {message.chat.id}")
+        else:
+            await send_message(
+                chat_id=message.chat.id,
+                text="<b>❌ Sorry Bro ImageAI Error</b>",
+                parse_mode=ParseMode.HTML
+            )
+            LOGGER.info(f"Sent imgai error message to chat {message.chat.id}")
