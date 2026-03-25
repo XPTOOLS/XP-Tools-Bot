@@ -1,0 +1,10 @@
+services:
+  𝗫𝗣 𝗧𝗢𝗢𝗟𝗦™:
+    build: .
+    container_name: 𝗫𝗣 𝗧𝗢𝗢𝗟𝗦™
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - .:/app
