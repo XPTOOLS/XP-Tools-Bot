@@ -11,24 +11,32 @@ from bot.misc.callback import handle_callback_query
 from importlib import import_module
 
 # Health check server for Render
-PORT = int(os.environ.get('PORT', 10000))
+PORT = int(os.environ.get('PORT', 8080))
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == '/ping' or self.path == '/health':
+        if self.path == '/ping' or self.path == '/health' or self.path == '/':
             self.send_response(200)
             self.send_header("Content-type", "text/plain")
             self.end_headers()
             self.wfile.write(b"OK")
-        elif self.path == '/':
-            self.send_response(200)
-            self.send_header("Content-type", "text/html")
-            self.end_headers()
-            html = "<h1>XPTOOLS Bot</h1><p>Bot is running</p>"
-            self.wfile.write(html.encode('utf-8'))
         else:
             self.send_response(404)
             self.end_headers()
+    
+    def do_HEAD(self):
+        """Handle HEAD requests for Render health checks"""
+        if self.path == '/ping' or self.path == '/health' or self.path == '/':
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    def log_message(self, format, *args):
+        """Suppress HTTP logs to reduce noise"""
+        pass
 
 def run_health_server():
     """Run HTTP server for Render health checks."""
