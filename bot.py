@@ -1,14 +1,34 @@
 import asyncio
 import logging
 import os
+from aiohttp import web
 from bot import SmartAIO, dp, SmartPyro, SmartUserBot
 from bot.core.database import SmartReboot
 from bot.helpers.logger import LOGGER
 from bot.misc.callback import handle_callback_query
 from importlib import import_module
 
+# Health check server for Render
+async def health_check(request):
+    return web.Response(text="Bot is running")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    
+    port = int(os.environ.get("PORT", 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    LOGGER.info(f"Health check server started on port {port}")
+
 async def main():
     try:
+        # Start health check server for Render
+        await start_web_server()
+        
         modules_path = "bot.modules"
         modules_dir = os.path.join(os.path.dirname(__file__), "bot", "modules")
         for filename in os.listdir(modules_dir):
